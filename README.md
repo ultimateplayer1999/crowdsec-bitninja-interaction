@@ -1,6 +1,7 @@
 This adds all Crowdsec blocked IPs to the local Bitninja blocklist. Requirements, Crowdsec and Bitninja on the same machine
 
 This needs some dependencies, these are mongoDB and dotenv. This can be installed with:
+---
 MongoDB:
 `go get go.mongodb.org/mongo-driver/mongo`
 ---
