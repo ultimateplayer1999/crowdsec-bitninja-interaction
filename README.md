@@ -36,3 +36,5 @@ Manually unban a IP:
 `go run main.go del 192.168.1.100`
 
 IP is ofcourse a dummy and go run main.go can be replaced with the binary like: `./bitninja-manager` for the local directory
+
+To use it with crowdsec enter the binary location in the proper location of the custom bouncer
