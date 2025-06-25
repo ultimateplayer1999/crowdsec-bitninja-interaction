@@ -31,7 +31,6 @@ Manually ban/Add a IP:
 
 Perma ban IP:
 `go run main.go add 192.168.1.102 permanent "Serious threat" '{"threat_level":"critical"}'`
-``
 
 Manually unban a IP:
 `go run main.go del 192.168.1.100`
