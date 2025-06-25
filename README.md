@@ -16,7 +16,7 @@ to build it as bitninja-manager
 The available commands are:
 
 Receive all currently banned IPs (logged):
-`go run main.go list`:
+`go run main.go list`
 
 Get stats:
 `go run main.go stats`
