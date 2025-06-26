@@ -23,8 +23,14 @@ Receive all currently banned IPs (logged):
 Get stats:
 `go run main.go stats`
 
-Manually cleanup expired bans:
+Manually cleanup expired bans (soft delete):
 `go run main.go cleanup`
+
+Remove old records from DB (thirty days):
+`go run main.go purge 30`
+
+For more days to keep, you can change 30 to like 60:
+`go run main.go purge 60`
 
 Manually ban/Add a IP:
 `go run main.go add 192.168.1.100 24h "Brute force attack" '{"severity":"high","source":"fail2ban"}'`
@@ -37,4 +43,16 @@ Manually unban a IP:
 
 IP is ofcourse a dummy and go run main.go can be replaced with the binary like: `./bitninja-manager` for the local directory
 
-To use it with crowdsec enter the binary location in the proper location of the custom bouncer
+To use it with crowdsec enter the binary location in the proper location of the custom bouncer.
+
+It is also possible to cleanup bans on a schedule, to do so, add the following to tools like crontab.
+```# Every day at 2:00 AM - cleanup expired bans (soft ban)
+0 2 * * * /path/to/your/script cleanup
+```
+---
+```# Every week on zondag at 3:00 AM - purge old records (30 dagen)
+0 3 * * 0 /path/to/your/script purge 30
+```
+---
+Same as before, you can change 30 to a custom value like 60
+`0 3 * * 0 /path/to/your/script purge 60`

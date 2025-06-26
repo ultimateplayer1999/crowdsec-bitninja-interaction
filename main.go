@@ -29,6 +29,7 @@ type BanRecord struct {
 	JsonData  map[string]interface{} `bson:"json_data" json:"json_data"`
 	Status    string                 `bson:"status" json:"status"`
 	Hostname  string                 `bson:"hostname" json:"hostname"`
+	RemovedAt *time.Time             `bson:"removed_at,omitempty" json:"removed_at,omitempty"`
 }
 
 type MongoConfig struct {
@@ -111,6 +112,12 @@ func parseDuration(duration string) (time.Duration, error) {
 		return 0, nil // 0 means permanent
 	}
 
+	// Check if it's just a number (assume seconds)
+	if seconds, err := strconv.Atoi(duration); err == nil {
+		return time.Duration(seconds) * time.Second, nil
+	}
+
+	// Handle days suffix (not supported by standard time.ParseDuration)
 	if strings.HasSuffix(duration, "d") {
 		days, err := strconv.Atoi(strings.TrimSuffix(duration, "d"))
 		if err != nil {
@@ -118,6 +125,14 @@ func parseDuration(duration string) (time.Duration, error) {
 		}
 		return time.Duration(days) * 24 * time.Hour, nil
 	}
+
+	// Handle other suffixes with explicit seconds support
+	if strings.HasSuffix(duration, "s") {
+		// Let time.ParseDuration handle it
+		return time.ParseDuration(duration)
+	}
+
+	// For other formats, try standard Go duration parsing
 	return time.ParseDuration(duration)
 }
 
@@ -165,6 +180,7 @@ func removeBanRecord(collection *mongo.Collection, ip string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	now := time.Now()
 	filter := bson.M{
 		"ip":     ip,
 		"status": "active",
@@ -172,7 +188,8 @@ func removeBanRecord(collection *mongo.Collection, ip string) error {
 
 	update := bson.M{
 		"$set": bson.M{
-			"status": "removed",
+			"status":     "removed",
+			"removed_at": now,
 		},
 	}
 
@@ -231,6 +248,78 @@ func cleanupExpiredBans(collection *mongo.Collection) error {
 	return nil
 }
 
+// Nieuwe functie om oude records te verwijderen
+func purgeOldRecords(collection *mongo.Collection, olderThanDays int) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Bereken de datum vanaf wanneer records verwijderd moeten worden
+	cutoffDate := time.Now().AddDate(0, 0, -olderThanDays)
+
+	// Filter voor records die verwijderd kunnen worden:
+	// 1. Status "removed" en removed_at ouder dan cutoffDate
+	// 2. Status "expired" en banned_at ouder dan cutoffDate (voor oude expired records)
+	filter := bson.M{
+		"$or": []bson.M{
+			{
+				"status": "removed",
+				"removed_at": bson.M{"$lt": cutoffDate},
+			},
+			{
+				"status": "expired",
+				"banned_at": bson.M{"$lt": cutoffDate},
+			},
+		},
+	}
+
+	// Eerst tellen hoeveel records verwijderd gaan worden
+	count, err := collection.CountDocuments(ctx, filter)
+	if err != nil {
+		return fmt.Errorf("error counting records to purge: %v", err)
+	}
+
+	if count == 0 {
+		fmt.Printf("No records found older than %d days to purge\n", olderThanDays)
+		return nil
+	}
+
+	fmt.Printf("Found %d records older than %d days to purge\n", count, olderThanDays)
+
+	// Optioneel: log welke records verwijderd gaan worden
+	cursor, err := collection.Find(ctx, filter)
+	if err != nil {
+		return fmt.Errorf("error finding records to purge: %v", err)
+	}
+	defer cursor.Close(ctx)
+
+	var recordsToPurge []BanRecord
+	if err = cursor.All(ctx, &recordsToPurge); err != nil {
+		return fmt.Errorf("error decoding records to purge: %v", err)
+	}
+
+	// Log de records die verwijderd gaan worden
+	fmt.Println("Records to be purged:")
+	for _, record := range recordsToPurge {
+		var dateStr string
+		if record.RemovedAt != nil {
+			dateStr = record.RemovedAt.Format("2006-01-02 15:04:05")
+		} else {
+			dateStr = record.BannedAt.Format("2006-01-02 15:04:05")
+		}
+		fmt.Printf("  IP: %s, Status: %s, Date: %s, Reason: %s\n",
+			record.IP, record.Status, dateStr, record.Reason)
+	}
+
+	// Daadwerkelijk verwijderen
+	result, err := collection.DeleteMany(ctx, filter)
+	if err != nil {
+		return fmt.Errorf("error purging records: %v", err)
+	}
+
+	fmt.Printf("Successfully purged %d records from database\n", result.DeletedCount)
+	return nil
+}
+
 func handleAdd(collection *mongo.Collection, ip string, duration string, reason string, jsonObject map[string]interface{}) {
 	// Add to BitNinja blacklist
 	enhancedReason := fmt.Sprintf("%s (Duration: %s, Host: %s)", reason, duration, getHostname())
@@ -283,6 +372,26 @@ func handleCleanup(collection *mongo.Collection) {
 		fmt.Printf("Error during cleanup: %v\n", err)
 	} else {
 		fmt.Println("Cleanup completed")
+	}
+}
+
+func handlePurge(collection *mongo.Collection, daysStr string) {
+	days := 30 // default
+	if daysStr != "" {
+		var err error
+		days, err = strconv.Atoi(daysStr)
+		if err != nil {
+			fmt.Printf("Invalid number of days: %s, using default of 30 days\n", daysStr)
+			days = 30
+		}
+	}
+
+	fmt.Printf("Purging records older than %d days...\n", days)
+	err := purgeOldRecords(collection, days)
+	if err != nil {
+		fmt.Printf("Error during purge: %v\n", err)
+	} else {
+		fmt.Println("Purge completed")
 	}
 }
 
@@ -376,6 +485,26 @@ func handleStats(collection *mongo.Collection) {
 	if err == nil {
 		fmt.Printf("  Expiring in next 24h: %d\n", count)
 	}
+
+	// Count records that can be purged (older than 30 days)
+	cutoffDate := time.Now().AddDate(0, 0, -30)
+	purgeableFilter := bson.M{
+		"$or": []bson.M{
+			{
+				"status": "removed",
+				"removed_at": bson.M{"$lt": cutoffDate},
+			},
+			{
+				"status": "expired",
+				"banned_at": bson.M{"$lt": cutoffDate},
+			},
+		},
+	}
+
+	purgeableCount, err := collection.CountDocuments(ctx, purgeableFilter)
+	if err == nil {
+		fmt.Printf("  Purgeable (>30 days old): %d\n", purgeableCount)
+	}
 }
 
 func processCommand(collection *mongo.Collection, command string, ip string, duration string, reason string, jsonObject map[string]interface{}) {
@@ -386,12 +515,14 @@ func processCommand(collection *mongo.Collection, command string, ip string, dur
 		handleDel(collection, ip, duration, reason, jsonObject)
 	case "cleanup":
 		handleCleanup(collection)
+	case "purge":
+		handlePurge(collection, duration) // duration wordt hergebruikt als days parameter
 	case "list":
 		handleList(collection)
 	case "stats":
 		handleStats(collection)
 	default:
-		fmt.Println("Invalid command. Available: add, del, cleanup, list, stats")
+		fmt.Println("Invalid command. Available: add, del, cleanup, purge, list, stats")
 	}
 }
 
@@ -415,6 +546,7 @@ func main() {
 		fmt.Println("  go run main.go add <ip> <duration> <reason> [json_object]")
 		fmt.Println("  go run main.go del <ip> [duration] [reason] [json_object]")
 		fmt.Println("  go run main.go cleanup")
+		fmt.Println("  go run main.go purge [days]           # Default: 30 days")
 		fmt.Println("  go run main.go list")
 		fmt.Println("  go run main.go stats")
 		fmt.Println("\nDuration examples: 24h, 30m, 2d, permanent")
@@ -422,7 +554,9 @@ func main() {
 		fmt.Printf("  MONGO_URI=%s\n", config.URI)
 		fmt.Printf("  MONGO_DATABASE=%s\n", config.Database)
 		fmt.Printf("  MONGO_COLLECTION=%s\n", config.Collection)
-		fmt.Println("\nNote: Run 'cleanup' command regularly (e.g., via cron) to remove expired bans")
+		fmt.Println("\nNote: Run 'cleanup' and 'purge' commands regularly (e.g., via cron)")
+		fmt.Println("      - cleanup: removes expired active bans")
+		fmt.Println("      - purge: permanently deletes old removed/expired records")
 		os.Exit(1)
 	}
 
@@ -439,6 +573,14 @@ func main() {
 	}
 	if command == "stats" {
 		handleStats(collection)
+		return
+	}
+	if command == "purge" {
+		days := ""
+		if len(os.Args) > 2 {
+			days = os.Args[2]
+		}
+		handlePurge(collection, days)
 		return
 	}
 
